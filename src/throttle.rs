@@ -1,19 +1,20 @@
 use futures::{FutureExt, Stream};
 use pin_project::pin_project;
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::time::{sleep, Instant, Sleep};
 
 #[pin_project]
-pub struct ThrottleFilter<S> {
+pub struct ThrottleTimeFilter<S> {
     #[pin]
     stream: S,
     duration: Duration,
     delay: Pin<Box<Sleep>>,
 }
 
-impl<S: Stream> Stream for ThrottleFilter<S> {
+impl<S: Stream> Stream for ThrottleTimeFilter<S> {
     type Item = S::Item;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -37,7 +38,7 @@ impl<S: Stream> Stream for ThrottleFilter<S> {
     }
 }
 
-impl<S> ThrottleFilter<S> {
+impl<S> ThrottleTimeFilter<S> {
     pub fn new(stream: S, duration: Duration) -> Self {
         Self {
             stream,
@@ -48,7 +49,7 @@ impl<S> ThrottleFilter<S> {
 }
 
 #[pin_project]
-pub struct Throttle<S> {
+pub struct ThrottleTime<S> {
     #[pin]
     stream: S,
     duration: Duration,
@@ -58,7 +59,7 @@ pub struct Throttle<S> {
 #[derive(Debug, Copy, Clone)]
 pub struct Throttled<T>(pub T);
 
-impl<S: Stream> Stream for Throttle<S> {
+impl<S: Stream> Stream for ThrottleTime<S> {
     type Item = Result<S::Item, Throttled<S::Item>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -87,12 +88,126 @@ impl<S: Stream> Stream for Throttle<S> {
     }
 }
 
-impl<S> Throttle<S> {
+impl<S> ThrottleTime<S> {
     pub fn new(stream: S, duration: Duration) -> Self {
         Self {
             stream,
             duration,
             last_time: None,
+        }
+    }
+}
+
+#[pin_project]
+pub struct ThrottleFilter<S, Selector, Fut> {
+    #[pin]
+    stream: S,
+    selector: Selector,
+    delay: Option<Fut>,
+}
+
+impl<S: Stream, Selector, Fut> Stream for ThrottleFilter<S, Selector, Fut>
+where
+    Selector: FnMut(&S::Item) -> Fut,
+    Fut: Future,
+{
+    type Item = S::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        let stream: Pin<&mut S> = this.stream;
+        let selector = this.selector;
+        let delay = this.delay;
+
+        let select = if let Some(delay) = &mut *delay {
+            let delay = unsafe { Pin::new_unchecked(delay) };
+            delay.poll(cx).is_ready()
+        } else {
+            true
+        };
+
+        match stream.poll_next(cx) {
+            Poll::Ready(Some(value)) => {
+                if select {
+                    *delay = Some(selector(&value));
+                    Poll::Ready(Some(value))
+                } else {
+                    Poll::Pending
+                }
+            }
+            pending_or_done => {
+                if select {
+                    *delay = None;
+                }
+                pending_or_done
+            }
+        }
+    }
+}
+
+impl<S, Selector, Fut> ThrottleFilter<S, Selector, Fut> {
+    pub fn new(stream: S, selector: Selector) -> Self {
+        Self {
+            stream,
+            selector,
+            delay: None,
+        }
+    }
+}
+
+#[pin_project]
+pub struct Throttle<S, Selector, Fut> {
+    #[pin]
+    stream: S,
+    selector: Selector,
+    delay: Option<Fut>,
+}
+
+impl<S: Stream, Selector, Fut> Stream for Throttle<S, Selector, Fut>
+where
+    Selector: FnMut(&S::Item) -> Fut,
+    Fut: Future,
+{
+    type Item = Result<S::Item, Throttled<S::Item>>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        let stream: Pin<&mut S> = this.stream;
+        let selector = this.selector;
+        let delay = this.delay;
+
+        let select = if let Some(delay) = &mut *delay {
+            let delay = unsafe { Pin::new_unchecked(delay) };
+            delay.poll(cx).is_ready()
+        } else {
+            true
+        };
+
+        match stream.poll_next(cx) {
+            Poll::Ready(Some(value)) => {
+                if select {
+                    *delay = Some(selector(&value));
+                    Poll::Ready(Some(Ok(value)))
+                } else {
+                    Poll::Ready(Some(Err(Throttled(value))))
+                }
+            }
+            pending_or_done => {
+                if select {
+                    *delay = None;
+                }
+                pending_or_done.map(|v| v.map(Ok))
+            }
+        }
+    }
+}
+
+impl<S, Selector, Fut> Throttle<S, Selector, Fut> {
+    pub fn new(stream: S, selector: Selector) -> Self {
+        Self {
+            stream,
+            selector,
+            delay: None,
         }
     }
 }

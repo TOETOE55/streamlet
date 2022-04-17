@@ -1,20 +1,21 @@
 use futures::stream::Stream;
 use futures::FutureExt;
 use pin_project::pin_project;
+use std::future::Future;
 use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 use tokio::time::{sleep, Instant, Sleep};
 
 #[pin_project]
-pub struct DebounceFilter<S: Stream> {
+pub struct DebounceTimeFilter<S: Stream> {
     duration: Duration,
     stream: Option<S>,
     last_value: Option<S::Item>,
     delay: Pin<Box<Sleep>>,
 }
 
-impl<S: Stream> Stream for DebounceFilter<S> {
+impl<S: Stream> Stream for DebounceTimeFilter<S> {
     type Item = S::Item;
 
     fn poll_next(
@@ -68,7 +69,7 @@ impl<S: Stream> Stream for DebounceFilter<S> {
     }
 }
 
-impl<S: Stream> DebounceFilter<S> {
+impl<S: Stream> DebounceTimeFilter<S> {
     pub fn new(stream: S, duration: Duration) -> Self {
         Self {
             stream: Some(stream),
@@ -83,14 +84,14 @@ impl<S: Stream> DebounceFilter<S> {
 pub struct Debounced<T>(pub T);
 
 #[pin_project]
-pub struct Debounce<S: Stream> {
+pub struct DebounceTime<S: Stream> {
     duration: Duration,
     stream: Option<S>,
     last_value: Option<S::Item>,
     delay: Pin<Box<Sleep>>,
 }
 
-impl<S: Stream> Stream for Debounce<S> {
+impl<S: Stream> Stream for DebounceTime<S> {
     type Item = Result<S::Item, Debounced<S::Item>>;
 
     fn poll_next(
@@ -140,13 +141,166 @@ impl<S: Stream> Stream for Debounce<S> {
     }
 }
 
-impl<S: Stream> Debounce<S> {
+impl<S: Stream> DebounceTime<S> {
     pub fn new(stream: S, duration: Duration) -> Self {
         Self {
             stream: Some(stream),
             delay: Box::pin(sleep(Duration::from_nanos(0))),
             last_value: None,
             duration,
+        }
+    }
+}
+
+#[pin_project]
+pub struct DebounceFilter<S: Stream, Selector, Fut> {
+    selector: Selector,
+    debouncer: Option<Fut>,
+    stream: Option<S>,
+    last_value: Option<S::Item>,
+}
+
+impl<S: Stream, Selector, Fut> Stream for DebounceFilter<S, Selector, Fut>
+where
+    Selector: FnMut(&S::Item) -> Fut,
+    Fut: Future,
+{
+    type Item = S::Item;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        let debouncer = this.debouncer;
+        let last_value = this.last_value;
+        let stream = this.stream;
+        let selector = this.selector;
+
+        let mut poll_res = Poll::Pending;
+
+        let buf_is_empty = last_value.is_none();
+        if !buf_is_empty {
+            if let Some(debouncer) = debouncer {
+                let debouncer = unsafe { Pin::new_unchecked(debouncer) };
+                if debouncer.poll(cx).is_ready() {
+                    poll_res = Poll::Ready(last_value.take());
+                }
+            }
+        }
+
+        let mut stream_is_terminated = stream.is_none();
+        if let Some(s) = stream {
+            let pin_stream = unsafe { Pin::new_unchecked(s) };
+            // 从stream中获取值，替换掉挂起的值
+            match pin_stream.poll_next(cx) {
+                Poll::Ready(Some(value)) => {
+                    *debouncer = Some(selector(&value));
+                    *last_value = Some(value);
+                    if buf_is_empty {
+                        cx.waker().wake_by_ref();
+                    }
+                }
+                Poll::Ready(None) => {
+                    *stream = None;
+                    stream_is_terminated = true;
+                }
+                Poll::Pending => {}
+            }
+        }
+
+        // stream结束且没有挂起的值
+        if buf_is_empty && stream_is_terminated {
+            poll_res = Poll::Ready(None);
+        }
+
+        poll_res
+    }
+}
+
+impl<S: Stream, Selector, Fut> DebounceFilter<S, Selector, Fut> {
+    pub fn new(stream: S, selector: Selector) -> Self {
+        Self {
+            stream: Some(stream),
+            debouncer: None,
+            last_value: None,
+            selector,
+        }
+    }
+}
+
+#[pin_project]
+pub struct Debounce<S: Stream, Selector, Fut> {
+    selector: Selector,
+    debouncer: Option<Fut>,
+    stream: Option<S>,
+    last_value: Option<S::Item>,
+}
+
+impl<S: Stream, Selector, Fut> Stream for Debounce<S, Selector, Fut>
+where
+    Selector: FnMut(&S::Item) -> Fut,
+    Fut: Future,
+{
+    type Item = Result<S::Item, Debounced<S::Item>>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        let debouncer = this.debouncer;
+        let last_value = this.last_value;
+        let stream = this.stream;
+        let selector = this.selector;
+
+        let mut poll_res = Poll::Pending;
+
+        let buf_is_empty = last_value.is_none();
+        if !buf_is_empty {
+            if let Some(debouncer) = debouncer {
+                let debouncer = unsafe { Pin::new_unchecked(debouncer) };
+                if debouncer.poll(cx).is_ready() {
+                    poll_res = Poll::Ready(last_value.take().map(Ok));
+                }
+            }
+        }
+        let mut stream_is_terminated = stream.is_none();
+        if let Some(s) = stream {
+            let pin_stream = unsafe { Pin::new_unchecked(s) };
+            match pin_stream.poll_next(cx) {
+                Poll::Ready(Some(value)) => {
+                    *debouncer = Some(selector(&value));
+                    if let Some(debounced) = last_value.replace(value) {
+                        poll_res = Poll::Ready(Some(Err(Debounced(debounced))));
+                    } else if buf_is_empty {
+                        cx.waker().wake_by_ref();
+                    }
+                }
+                Poll::Ready(None) => {
+                    *stream = None;
+                    stream_is_terminated = true;
+                }
+                Poll::Pending => {}
+            }
+        }
+
+        // stream结束且没有挂起的值
+        if buf_is_empty && stream_is_terminated {
+            poll_res = Poll::Ready(None);
+        }
+
+        poll_res
+    }
+}
+
+impl<S: Stream, Selector, Fut> Debounce<S, Selector, Fut> {
+    pub fn new(stream: S, selector: Selector) -> Self {
+        Self {
+            stream: Some(stream),
+            debouncer: None,
+            last_value: None,
+            selector,
         }
     }
 }
