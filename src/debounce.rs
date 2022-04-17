@@ -1,7 +1,6 @@
 use futures::stream::Stream;
 use futures::FutureExt;
 use pin_project::pin_project;
-use std::mem;
 use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
@@ -29,50 +28,40 @@ impl<S: Stream> Stream for DebounceFilter<S> {
         let stream = this.stream;
 
         let mut poll_res = Poll::Pending;
-        // 0b000: stream 没有结束，且还有挂起的值
-        // 0b001: stream 没有结束，但没有挂起的值
-        // 0b010: stream 刚结束，且还有挂起的值
-        // 0b011: stream 刚结束，但没有挂起的值
-        // 0b100: stream 已经结束，且还有挂起的值
-        // 0b101: stream 已经结束，但没有挂起的值
-        let mut end_flag: u8 = last_value.is_none() as u8;
-        let mut state_changed = false;
 
-        if last_value.is_some() && delay.poll_unpin(cx).is_ready() {
-            delay.as_mut().reset(Instant::now() + duration);
+        let buf_is_empty = last_value.is_none();
+        // 挂起的值到时间就返回
+        if !buf_is_empty && delay.poll_unpin(cx).is_ready() {
             poll_res = Poll::Ready(last_value.take());
         }
 
+        let mut stream_is_terminated = stream.is_none();
         if let Some(s) = stream {
             let pin_stream = unsafe { Pin::new_unchecked(s) };
+            // 从stream中获取值，替换掉挂起的值
             match pin_stream.poll_next(cx) {
                 Poll::Ready(Some(value)) => {
                     delay.as_mut().reset(Instant::now() + duration);
                     *last_value = Some(value);
-                    state_changed = true;
+                    // poll_res.is_pending() <-
+                    //     buf_is_empty ||
+                    //     delay.poll_unpin(cx).is_pending()
+                    // 第二种情况这个stream会被唤醒，只需要buf_is_empty辅助需要唤醒
+                    if buf_is_empty {
+                        cx.waker().wake_by_ref();
+                    }
                 }
                 Poll::Ready(None) => {
-                    end_flag |= 0b010;
+                    *stream = None;
+                    stream_is_terminated = true;
                 }
                 Poll::Pending => {}
             }
-        } else {
-            end_flag |= 0b100;
         }
 
         // stream结束且没有挂起的值
-        if end_flag == 0b011 || end_flag == 0b101 {
+        if buf_is_empty && stream_is_terminated {
             poll_res = Poll::Ready(None);
-        }
-
-        // stream刚结束，且有挂起的值
-        if end_flag == 0b010 {
-            *stream = None;
-            state_changed = true;
-        }
-
-        if state_changed && poll_res.is_pending() {
-            cx.waker().wake_by_ref();
         }
 
         poll_res
@@ -115,52 +104,36 @@ impl<S: Stream> Stream for Debounce<S> {
         let stream = this.stream;
 
         let mut poll_res = Poll::Pending;
-        // 0b000: stream 没有结束，且还有挂起的值
-        // 0b001: stream 没有结束，但没有挂起的值
-        // 0b010: stream 刚结束，且还有挂起的值
-        // 0b011: stream 刚结束，但没有挂起的值
-        // 0b100: stream 已经结束，且还有挂起的值
-        // 0b101: stream 已经结束，但没有挂起的值
-        let mut end_flag: u8 = last_value.is_none() as u8;
-        let mut state_changed = false;
 
-        if last_value.is_some() && delay.poll_unpin(cx).is_ready() {
-            delay.as_mut().reset(Instant::now() + duration);
+        let buf_is_empty = last_value.is_none();
+        // 挂起的值到时间就返回
+        if !buf_is_empty && delay.poll_unpin(cx).is_ready() {
             poll_res = Poll::Ready(last_value.take().map(Ok));
         }
 
+        let mut stream_is_terminated = stream.is_none();
         if let Some(s) = stream {
             let pin_stream = unsafe { Pin::new_unchecked(s) };
             match pin_stream.poll_next(cx) {
                 Poll::Ready(Some(value)) => {
                     delay.as_mut().reset(Instant::now() + duration);
-                    state_changed = true;
-                    if let Some(debounced) = mem::replace(last_value, Some(value)) {
+                    if let Some(debounced) = last_value.replace(value) {
                         poll_res = Poll::Ready(Some(Err(Debounced(debounced))));
+                    } else if buf_is_empty {
+                        cx.waker().wake_by_ref();
                     }
                 }
                 Poll::Ready(None) => {
-                    end_flag |= 0b010;
+                    *stream = None;
+                    stream_is_terminated = true;
                 }
                 Poll::Pending => {}
             }
-        } else {
-            end_flag |= 0b100;
         }
 
         // stream结束且没有挂起的值
-        if end_flag == 0b011 || end_flag == 0b101 {
+        if buf_is_empty && stream_is_terminated {
             poll_res = Poll::Ready(None);
-        }
-
-        // stream刚结束，且有挂起的值
-        if end_flag == 0b010 {
-            *stream = None;
-            state_changed = true;
-        }
-
-        if state_changed && poll_res.is_pending() {
-            cx.waker().wake_by_ref();
         }
 
         poll_res
