@@ -6,7 +6,7 @@ use std::time::Duration;
 use streamlet::debounce::Debounced;
 use streamlet::Streamlet;
 
-pub fn chunk_debounce<Subscriber, Fut, Until, Msg>(
+pub fn debounce_window<Subscriber, Fut, Until, Msg>(
     duration: Duration,
     until: Until,
     mut subscriber: Subscriber,

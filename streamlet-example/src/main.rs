@@ -1,5 +1,5 @@
 use async_stream::stream;
-use chunk_debounce::chunk_debounce;
+use chunk_debounce::debounce_window;
 use futures::{Stream, StreamExt};
 use std::time::Duration;
 use streamlet::Streamlet;
@@ -49,7 +49,7 @@ async fn main() {
     }
 
     {
-        let tx = chunk_debounce(
+        let tx = debounce_window(
             Duration::from_millis(200),
             futures::future::pending::<()>(),
             |msg, debounceds| async move {
