@@ -10,6 +10,7 @@ use tokio::time::{sleep, Instant, Sleep};
 #[pin_project]
 pub struct DebounceTimeFilter<S: Stream> {
     duration: Duration,
+    #[pin]
     stream: Option<S>,
     last_value: Option<S::Item>,
     delay: Pin<Box<Sleep>>,
@@ -26,7 +27,7 @@ impl<S: Stream> Stream for DebounceTimeFilter<S> {
         let this = self.project();
         let delay = this.delay;
         let last_value = this.last_value;
-        let stream = this.stream;
+        let mut stream = this.stream;
 
         let mut poll_res = Poll::Pending;
 
@@ -37,8 +38,7 @@ impl<S: Stream> Stream for DebounceTimeFilter<S> {
         }
 
         let mut stream_is_terminated = stream.is_none();
-        if let Some(s) = stream {
-            let pin_stream = unsafe { Pin::new_unchecked(s) };
+        if let Some(pin_stream) = stream.as_mut().as_pin_mut() {
             // 从stream中获取值，替换掉挂起的值
             match pin_stream.poll_next(cx) {
                 Poll::Ready(Some(value)) => {
@@ -53,7 +53,7 @@ impl<S: Stream> Stream for DebounceTimeFilter<S> {
                     }
                 }
                 Poll::Ready(None) => {
-                    *stream = None;
+                    stream.set(None);
                     stream_is_terminated = true;
                 }
                 Poll::Pending => {}
@@ -86,6 +86,7 @@ pub struct Debounced<T>(pub T);
 #[pin_project]
 pub struct DebounceTime<S: Stream> {
     duration: Duration,
+    #[pin]
     stream: Option<S>,
     last_value: Option<S::Item>,
     delay: Pin<Box<Sleep>>,
@@ -102,7 +103,7 @@ impl<S: Stream> Stream for DebounceTime<S> {
         let this = self.project();
         let delay = this.delay;
         let last_value = this.last_value;
-        let stream = this.stream;
+        let mut stream = this.stream;
 
         let mut poll_res = Poll::Pending;
 
@@ -113,8 +114,7 @@ impl<S: Stream> Stream for DebounceTime<S> {
         }
 
         let mut stream_is_terminated = stream.is_none();
-        if let Some(s) = stream {
-            let pin_stream = unsafe { Pin::new_unchecked(s) };
+        if let Some(pin_stream) = stream.as_mut().as_pin_mut() {
             match pin_stream.poll_next(cx) {
                 Poll::Ready(Some(value)) => {
                     delay.as_mut().reset(Instant::now() + duration);
@@ -125,7 +125,7 @@ impl<S: Stream> Stream for DebounceTime<S> {
                     }
                 }
                 Poll::Ready(None) => {
-                    *stream = None;
+                    stream.set(None);
                     stream_is_terminated = true;
                 }
                 Poll::Pending => {}
@@ -155,7 +155,9 @@ impl<S: Stream> DebounceTime<S> {
 #[pin_project]
 pub struct DebounceFilter<S: Stream, Selector, Fut> {
     selector: Selector,
+    #[pin]
     debouncer: Option<Fut>,
+    #[pin]
     stream: Option<S>,
     last_value: Option<S::Item>,
 }
@@ -172,17 +174,16 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        let debouncer = this.debouncer;
+        let mut debouncer: Pin<&mut Option<Fut>> = this.debouncer;
         let last_value = this.last_value;
-        let stream = this.stream;
+        let mut stream: Pin<&mut Option<S>> = this.stream;
         let selector = this.selector;
 
         let mut poll_res = Poll::Pending;
 
         let buf_is_empty = last_value.is_none();
         if !buf_is_empty {
-            if let Some(debouncer) = debouncer {
-                let debouncer = unsafe { Pin::new_unchecked(debouncer) };
+            if let Some(debouncer) = debouncer.as_mut().as_pin_mut() {
                 if debouncer.poll(cx).is_ready() {
                     poll_res = Poll::Ready(last_value.take());
                 }
@@ -190,19 +191,18 @@ where
         }
 
         let mut stream_is_terminated = stream.is_none();
-        if let Some(s) = stream {
-            let pin_stream = unsafe { Pin::new_unchecked(s) };
+        if let Some(pin_stream) = stream.as_mut().as_pin_mut() {
             // 从stream中获取值，替换掉挂起的值
             match pin_stream.poll_next(cx) {
                 Poll::Ready(Some(value)) => {
-                    *debouncer = Some(selector(&value));
+                    debouncer.set(Some(selector(&value)));
                     *last_value = Some(value);
                     if buf_is_empty {
                         cx.waker().wake_by_ref();
                     }
                 }
                 Poll::Ready(None) => {
-                    *stream = None;
+                    stream.set(None);
                     stream_is_terminated = true;
                 }
                 Poll::Pending => {}
@@ -232,7 +232,9 @@ impl<S: Stream, Selector, Fut> DebounceFilter<S, Selector, Fut> {
 #[pin_project]
 pub struct Debounce<S: Stream, Selector, Fut> {
     selector: Selector,
+    #[pin]
     debouncer: Option<Fut>,
+    #[pin]
     stream: Option<S>,
     last_value: Option<S::Item>,
 }
@@ -249,28 +251,26 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        let debouncer = this.debouncer;
+        let mut debouncer = this.debouncer;
         let last_value = this.last_value;
-        let stream = this.stream;
+        let mut stream = this.stream;
         let selector = this.selector;
 
         let mut poll_res = Poll::Pending;
 
         let buf_is_empty = last_value.is_none();
         if !buf_is_empty {
-            if let Some(debouncer) = debouncer {
-                let debouncer = unsafe { Pin::new_unchecked(debouncer) };
+            if let Some(debouncer) = debouncer.as_mut().as_pin_mut() {
                 if debouncer.poll(cx).is_ready() {
                     poll_res = Poll::Ready(last_value.take().map(Ok));
                 }
             }
         }
         let mut stream_is_terminated = stream.is_none();
-        if let Some(s) = stream {
-            let pin_stream = unsafe { Pin::new_unchecked(s) };
+        if let Some(pin_stream) = stream.as_mut().as_pin_mut() {
             match pin_stream.poll_next(cx) {
                 Poll::Ready(Some(value)) => {
-                    *debouncer = Some(selector(&value));
+                    debouncer.set(Some(selector(&value)));
                     if let Some(debounced) = last_value.replace(value) {
                         poll_res = Poll::Ready(Some(Err(Debounced(debounced))));
                     } else if buf_is_empty {
@@ -278,7 +278,7 @@ where
                     }
                 }
                 Poll::Ready(None) => {
-                    *stream = None;
+                    stream.set(None);
                     stream_is_terminated = true;
                 }
                 Poll::Pending => {}

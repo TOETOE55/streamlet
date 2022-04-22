@@ -103,6 +103,7 @@ pub struct ThrottleFilter<S, Selector, Fut> {
     #[pin]
     stream: S,
     selector: Selector,
+    #[pin]
     delay: Option<Fut>,
 }
 
@@ -115,12 +116,11 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        let stream: Pin<&mut S> = this.stream;
+        let stream = this.stream;
         let selector = this.selector;
-        let delay = this.delay;
+        let mut delay = this.delay;
 
-        let select = if let Some(delay) = &mut *delay {
-            let delay = unsafe { Pin::new_unchecked(delay) };
+        let select = if let Some(delay) = delay.as_mut().as_pin_mut() {
             delay.poll(cx).is_ready()
         } else {
             true
@@ -129,7 +129,7 @@ where
         match stream.poll_next(cx) {
             Poll::Ready(Some(value)) => {
                 if select {
-                    *delay = Some(selector(&value));
+                    delay.set(Some(selector(&value)));
                     Poll::Ready(Some(value))
                 } else {
                     Poll::Pending
@@ -137,7 +137,7 @@ where
             }
             pending_or_done => {
                 if select {
-                    *delay = None;
+                    delay.set(None);
                 }
                 pending_or_done
             }
@@ -160,6 +160,7 @@ pub struct Throttle<S, Selector, Fut> {
     #[pin]
     stream: S,
     selector: Selector,
+    #[pin]
     delay: Option<Fut>,
 }
 
@@ -172,12 +173,11 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        let stream: Pin<&mut S> = this.stream;
+        let stream = this.stream;
         let selector = this.selector;
-        let delay = this.delay;
+        let mut delay = this.delay;
 
-        let select = if let Some(delay) = &mut *delay {
-            let delay = unsafe { Pin::new_unchecked(delay) };
+        let select = if let Some(delay) = delay.as_mut().as_pin_mut() {
             delay.poll(cx).is_ready()
         } else {
             true
@@ -186,7 +186,7 @@ where
         match stream.poll_next(cx) {
             Poll::Ready(Some(value)) => {
                 if select {
-                    *delay = Some(selector(&value));
+                    delay.set(Some(selector(&value)));
                     Poll::Ready(Some(Ok(value)))
                 } else {
                     Poll::Ready(Some(Err(Throttled(value))))
@@ -194,7 +194,7 @@ where
             }
             pending_or_done => {
                 if select {
-                    *delay = None;
+                    delay.set(None);
                 }
                 pending_or_done.map(|v| v.map(Ok))
             }
