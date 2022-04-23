@@ -197,9 +197,7 @@ where
                 Poll::Ready(Some(value)) => {
                     debouncer.set(Some(selector(&value)));
                     *last_value = Some(value);
-                    if buf_is_empty {
-                        cx.waker().wake_by_ref();
-                    }
+                    cx.waker().wake_by_ref();
                 }
                 Poll::Ready(None) => {
                     stream.set(None);
@@ -273,7 +271,7 @@ where
                     debouncer.set(Some(selector(&value)));
                     if let Some(debounced) = last_value.replace(value) {
                         poll_res = Poll::Ready(Some(Err(Debounced(debounced))));
-                    } else if buf_is_empty {
+                    } else {
                         cx.waker().wake_by_ref();
                     }
                 }
