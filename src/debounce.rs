@@ -24,48 +24,47 @@ impl<S: Stream> Stream for DebounceTimeFilter<S> {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         let duration = self.duration;
-        let this = self.project();
-        let delay = this.delay;
-        let last_value = this.last_value;
-        let mut stream = this.stream;
+        let mut this = self.project();
 
-        let mut poll_res = Poll::Pending;
+        loop {
+            let mut delay = this.delay.as_mut();
+            let last_value = &mut *this.last_value;
+            let mut stream = this.stream.as_mut();
 
-        let buf_is_empty = last_value.is_none();
-        // 挂起的值到时间就返回
-        if !buf_is_empty && delay.poll_unpin(cx).is_ready() {
-            poll_res = Poll::Ready(last_value.take());
-        }
+            let mut poll_res = Poll::Pending;
 
-        let mut stream_is_terminated = stream.is_none();
-        if let Some(pin_stream) = stream.as_mut().as_pin_mut() {
-            // 从stream中获取值，替换掉挂起的值
-            match pin_stream.poll_next(cx) {
-                Poll::Ready(Some(value)) => {
-                    delay.as_mut().reset(Instant::now() + duration);
-                    *last_value = Some(value);
-                    // poll_res.is_pending() <-
-                    //     buf_is_empty ||
-                    //     delay.poll_unpin(cx).is_pending()
-                    // 第二种情况这个stream会被唤醒，只需要buf_is_empty辅助需要唤醒
-                    if buf_is_empty {
-                        cx.waker().wake_by_ref();
-                    }
-                }
-                Poll::Ready(None) => {
-                    stream.set(None);
-                    stream_is_terminated = true;
-                }
-                Poll::Pending => {}
+            let buf_is_empty = last_value.is_none();
+            // 挂起的值到时间就返回
+            if !buf_is_empty && delay.poll_unpin(cx).is_ready() {
+                poll_res = Poll::Ready(last_value.take());
             }
-        }
 
-        // stream结束且没有挂起的值
-        if buf_is_empty && stream_is_terminated {
-            poll_res = Poll::Ready(None);
-        }
+            let mut stream_is_terminated = stream.is_none();
+            if let Some(pin_stream) = stream.as_mut().as_pin_mut() {
+                // 从stream中获取值，替换掉挂起的值
+                match pin_stream.poll_next(cx) {
+                    Poll::Ready(Some(value)) => {
+                        delay.as_mut().reset(Instant::now() + duration);
+                        *last_value = Some(value);
+                        if poll_res.is_pending() {
+                            continue;
+                        }
+                    }
+                    Poll::Ready(None) => {
+                        stream.set(None);
+                        stream_is_terminated = true;
+                    }
+                    Poll::Pending => {}
+                }
+            }
 
-        poll_res
+            // stream结束且没有挂起的值
+            if buf_is_empty && stream_is_terminated {
+                poll_res = Poll::Ready(None);
+            }
+
+            break poll_res;
+        }
     }
 }
 
@@ -100,44 +99,49 @@ impl<S: Stream> Stream for DebounceTime<S> {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         let duration = self.duration;
-        let this = self.project();
-        let delay = this.delay;
-        let last_value = this.last_value;
-        let mut stream = this.stream;
+        let mut this = self.project();
 
-        let mut poll_res = Poll::Pending;
+        loop {
+            let mut delay = this.delay.as_mut();
+            let last_value = &mut* this.last_value;
+            let mut stream = this.stream.as_mut();
 
-        let buf_is_empty = last_value.is_none();
-        // 挂起的值到时间就返回
-        if !buf_is_empty && delay.poll_unpin(cx).is_ready() {
-            poll_res = Poll::Ready(last_value.take().map(Ok));
-        }
+            let mut poll_res = Poll::Pending;
 
-        let mut stream_is_terminated = stream.is_none();
-        if let Some(pin_stream) = stream.as_mut().as_pin_mut() {
-            match pin_stream.poll_next(cx) {
-                Poll::Ready(Some(value)) => {
-                    delay.as_mut().reset(Instant::now() + duration);
-                    if let Some(debounced) = last_value.replace(value) {
-                        poll_res = Poll::Ready(Some(Err(Debounced(debounced))));
-                    } else if buf_is_empty {
-                        cx.waker().wake_by_ref();
-                    }
-                }
-                Poll::Ready(None) => {
-                    stream.set(None);
-                    stream_is_terminated = true;
-                }
-                Poll::Pending => {}
+            let buf_is_empty = last_value.is_none();
+            // 挂起的值到时间就返回
+            if !buf_is_empty && delay.poll_unpin(cx).is_ready() {
+                poll_res = Poll::Ready(last_value.take().map(Ok));
             }
-        }
 
-        // stream结束且没有挂起的值
-        if buf_is_empty && stream_is_terminated {
-            poll_res = Poll::Ready(None);
-        }
+            let mut stream_is_terminated = stream.is_none();
+            if let Some(pin_stream) = stream.as_mut().as_pin_mut() {
+                match pin_stream.poll_next(cx) {
+                    Poll::Ready(Some(value)) => {
+                        delay.as_mut().reset(Instant::now() + duration);
+                        if let Some(debounced) = last_value.replace(value) {
+                            poll_res = Poll::Ready(Some(Err(Debounced(debounced))));
+                        }
 
-        poll_res
+                        if poll_res.is_pending() {
+                            continue;
+                        }
+                    }
+                    Poll::Ready(None) => {
+                        stream.set(None);
+                        stream_is_terminated = true;
+                    }
+                    Poll::Pending => {}
+                }
+            }
+
+            // stream结束且没有挂起的值
+            if buf_is_empty && stream_is_terminated {
+                poll_res = Poll::Ready(None);
+            }
+
+            break poll_res;
+        }
     }
 }
 
@@ -173,46 +177,51 @@ where
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-        let mut debouncer: Pin<&mut Option<Fut>> = this.debouncer;
-        let last_value = this.last_value;
-        let mut stream: Pin<&mut Option<S>> = this.stream;
-        let selector = this.selector;
+        let mut this = self.project();
 
-        let mut poll_res = Poll::Pending;
+        loop {
+            let mut debouncer = this.debouncer.as_mut();
+            let last_value = &mut* this.last_value;
+            let mut stream = this.stream.as_mut();
+            let selector = &mut* this.selector;
 
-        let buf_is_empty = last_value.is_none();
-        if !buf_is_empty {
-            if let Some(debouncer) = debouncer.as_mut().as_pin_mut() {
-                if debouncer.poll(cx).is_ready() {
-                    poll_res = Poll::Ready(last_value.take());
+            let mut poll_res = Poll::Pending;
+
+            let buf_is_empty = last_value.is_none();
+            if !buf_is_empty {
+                if let Some(debouncer) = debouncer.as_mut().as_pin_mut() {
+                    if debouncer.poll(cx).is_ready() {
+                        poll_res = Poll::Ready(last_value.take());
+                    }
                 }
             }
-        }
 
-        let mut stream_is_terminated = stream.is_none();
-        if let Some(pin_stream) = stream.as_mut().as_pin_mut() {
-            // 从stream中获取值，替换掉挂起的值
-            match pin_stream.poll_next(cx) {
-                Poll::Ready(Some(value)) => {
-                    debouncer.set(Some(selector(&value)));
-                    *last_value = Some(value);
-                    cx.waker().wake_by_ref();
+            let mut stream_is_terminated = stream.is_none();
+            if let Some(pin_stream) = stream.as_mut().as_pin_mut() {
+                // 从stream中获取值，替换掉挂起的值
+                match pin_stream.poll_next(cx) {
+                    Poll::Ready(Some(value)) => {
+                        debouncer.set(Some(selector(&value)));
+                        *last_value = Some(value);
+                        if poll_res.is_pending() {
+                            continue;
+                        }
+                    }
+                    Poll::Ready(None) => {
+                        stream.set(None);
+                        stream_is_terminated = true;
+                    }
+                    Poll::Pending => {}
                 }
-                Poll::Ready(None) => {
-                    stream.set(None);
-                    stream_is_terminated = true;
-                }
-                Poll::Pending => {}
             }
-        }
 
-        // stream结束且没有挂起的值
-        if buf_is_empty && stream_is_terminated {
-            poll_res = Poll::Ready(None);
-        }
+            // stream结束且没有挂起的值
+            if buf_is_empty && stream_is_terminated {
+                poll_res = Poll::Ready(None);
+            }
 
-        poll_res
+            break poll_res;
+        }
     }
 }
 
@@ -248,47 +257,52 @@ where
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-        let mut debouncer = this.debouncer;
-        let last_value = this.last_value;
-        let mut stream = this.stream;
-        let selector = this.selector;
+        let mut this = self.project();
 
-        let mut poll_res = Poll::Pending;
+        loop {
+            let mut debouncer = this.debouncer.as_mut();
+            let last_value = &mut *this.last_value;
+            let mut stream = this.stream.as_mut();
+            let selector = &mut *this.selector;
 
-        let buf_is_empty = last_value.is_none();
-        if !buf_is_empty {
-            if let Some(debouncer) = debouncer.as_mut().as_pin_mut() {
-                if debouncer.poll(cx).is_ready() {
-                    poll_res = Poll::Ready(last_value.take().map(Ok));
-                }
-            }
-        }
-        let mut stream_is_terminated = stream.is_none();
-        if let Some(pin_stream) = stream.as_mut().as_pin_mut() {
-            match pin_stream.poll_next(cx) {
-                Poll::Ready(Some(value)) => {
-                    debouncer.set(Some(selector(&value)));
-                    if let Some(debounced) = last_value.replace(value) {
-                        poll_res = Poll::Ready(Some(Err(Debounced(debounced))));
-                    } else {
-                        cx.waker().wake_by_ref();
+            let mut poll_res = Poll::Pending;
+
+            let buf_is_empty = last_value.is_none();
+            if !buf_is_empty {
+                if let Some(debouncer) = debouncer.as_mut().as_pin_mut() {
+                    if debouncer.poll(cx).is_ready() {
+                        poll_res = Poll::Ready(last_value.take().map(Ok));
                     }
                 }
-                Poll::Ready(None) => {
-                    stream.set(None);
-                    stream_is_terminated = true;
-                }
-                Poll::Pending => {}
             }
-        }
+            let mut stream_is_terminated = stream.is_none();
+            if let Some(pin_stream) = stream.as_mut().as_pin_mut() {
+                match pin_stream.poll_next(cx) {
+                    Poll::Ready(Some(value)) => {
+                        debouncer.set(Some(selector(&value)));
+                        if let Some(debounced) = last_value.replace(value) {
+                            poll_res = Poll::Ready(Some(Err(Debounced(debounced))));
+                        }
 
-        // stream结束且没有挂起的值
-        if buf_is_empty && stream_is_terminated {
-            poll_res = Poll::Ready(None);
-        }
+                        if poll_res.is_pending() {
+                            continue;
+                        }
+                    }
+                    Poll::Ready(None) => {
+                        stream.set(None);
+                        stream_is_terminated = true;
+                    }
+                    Poll::Pending => {}
+                }
+            }
 
-        poll_res
+            // stream结束且没有挂起的值
+            if buf_is_empty && stream_is_terminated {
+                poll_res = Poll::Ready(None);
+            }
+
+            break poll_res;
+        }
     }
 }
 
